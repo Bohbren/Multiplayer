@@ -181,7 +181,11 @@ namespace Multiplayer.Client
                     if (target == null)
                     {
                         Log.Error($"!!! Tickable of {cmd.mapId} not found! {cmd}");
-                    } else target.ExecuteCmd(cmd);
+                    } else
+                    {
+                        Multiplayer.game?.sync.RecordCommand(cmd);
+                        target.ExecuteCmd(cmd);
+                    }
 
                     if (LongEventHandler.eventQueue.Count > 0) return true; // Yield to e.g. join-point creation
                 }

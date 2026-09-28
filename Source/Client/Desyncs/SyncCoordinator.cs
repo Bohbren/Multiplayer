@@ -4,6 +4,7 @@ using System.Linq;
 using Multiplayer.Client.Desyncs;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
+using Multiplayer.Common.Desyncs;
 using Multiplayer.Common.Networking.Packet;
 using RimWorld;
 using Verse;
@@ -28,6 +29,9 @@ namespace Multiplayer.Client
 
         public int lastValidTick = -1;
         public bool arbiterWasPlayingOnLastValidTick;
+
+        // What players did right before a desync, for the report's summary.md
+        public readonly RecentCommandLog recentCommands = new();
 
         private const int MaxBacklog = 30;
 
@@ -131,7 +135,7 @@ namespace Multiplayer.Client
             MpUI.ClearWindowStack();
             Find.WindowStack.Add(new DesyncedWindow(
                 desyncMessage,
-                new SaveableDesyncInfo(this, local, remote, diffAt, found)
+                new SaveableDesyncInfo(this, local, remote, diffAt, found, desyncMessage)
             ));
         }
 
@@ -153,6 +157,21 @@ namespace Multiplayer.Client
                 return count - 1;
 
             return -1;
+        }
+
+        public void RecordCommand(ScheduledCommand cmd)
+        {
+            if (!ShouldCollect) return;
+            recentCommands.Add(new RecentCommand(cmd.ticks, cmd.type.ToString(), cmd.mapId, cmd.playerId,
+                cmd.IsIssuedBySelf(), DescribeCommand(cmd)));
+        }
+
+        private static string DescribeCommand(ScheduledCommand cmd)
+        {
+            if (cmd.type != CommandType.Sync || cmd.data.Length < 4) return null;
+
+            int syncId = BitConverter.ToInt32(cmd.data, 0);
+            return syncId >= 0 && syncId < Sync.handlers.Count ? Sync.handlers[syncId].ToString() : $"unknown sync id {syncId}";
         }
 
         /// <summary>

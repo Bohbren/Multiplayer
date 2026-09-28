@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using HarmonyLib;
 using JetBrains.Annotations;
 using Multiplayer.Common;
+using Multiplayer.Common.Desyncs;
 using Multiplayer.Common.Util;
 using RimWorld;
 using UnityEngine;
@@ -22,13 +23,16 @@ public class SaveableDesyncInfo(
     ClientSyncOpinion local,
     ClientSyncOpinion remote,
     int diffAt,
-    bool diffAtFound)
+    bool diffAtFound,
+    string desyncMessage)
 {
     public readonly ClientSyncOpinion local = local;
     public readonly ClientSyncOpinion remote = remote;
     public readonly int diffAt = diffAt;
     private readonly Task<string> metadata = Task.Run(MetadataGenerator.Generate);
     private readonly Task<FileInfo> replay = Task.Run(SaveReplayIfApplicable);
+    // Built right away on the main thread, while game state still reflects the desync
+    private readonly DesyncReport report = BuildReport(coordinator, local, remote, diffAt, diffAtFound, desyncMessage);
 
     public bool ReadyToSave => metadata.IsCompleted && replay.IsCompleted;
 
@@ -36,11 +40,13 @@ public class SaveableDesyncInfo(
     {
         var watch = Stopwatch.StartNew();
 
+        var zipPath = Path.Combine(Multiplayer.DesyncsDir, FindFileNameForNextDesyncFile() + ".zip");
+
         try
         {
-            var desyncFilePath = FindFileNameForNextDesyncFile();
-            using var zip = MpZipFile.Open(Path.Combine(Multiplayer.DesyncsDir, desyncFilePath + ".zip"), ZipArchiveMode.Create);
+            using var zip = MpZipFile.Open(zipPath, ZipArchiveMode.Create);
 
+            zip.AddEntry(DesyncArchive.SummaryEntry, report.ToMarkdown());
             zip.AddEntry("desync_info", GetDesyncDetails());
 
             zip.AddEntry("local_traces.txt", GetLocalTraces());
@@ -73,7 +79,80 @@ public class SaveableDesyncInfo(
             Log.Error($"Exception writing desync info: {e}");
         }
 
+        try
+        {
+            if (File.Exists(zipPath))
+                DesyncArchive.Add(zipPath, DesyncArchiveDir, DesyncArchive.ArchiveFileName(report.CreatedUtc, report.Signature));
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"Couldn't copy desync report to the archive: {e}");
+        }
+
         Log.Message($"Desync info writing took {watch.ElapsedMilliseconds}");
+    }
+
+    public static string DesyncArchiveDir => Path.Combine(Multiplayer.DesyncsDir, "Archive");
+
+    private static DesyncReport BuildReport(SyncCoordinator coordinator, ClientSyncOpinion local,
+        ClientSyncOpinion remote, int diffAt, bool diffAtFound, string desyncMessage)
+    {
+        var report = new DesyncReport
+        {
+            CreatedUtc = DateTime.UtcNow,
+            DesyncMessage = desyncMessage ?? "",
+            DiffAt = diffAt,
+            DiffAtFound = diffAtFound,
+            LocalTraceCount = local.desyncStackTraceHashes.Count,
+            RemoteTraceCount = remote.desyncStackTraceHashes.Count,
+            OpinionStartTick = local.startTick,
+            LastValidTick = coordinator.lastValidTick,
+            RecentCommands = coordinator.recentCommands.Snapshot(),
+        };
+
+        // Each piece is best-effort: a failure here must never stop the desync zip from being written
+        try
+        {
+            report.MpVersion = MpVersion.Version;
+            report.GameVersion = VersionControl.CurrentVersionStringWithRev;
+            report.ActiveExpansions = ModLister.AllExpansions
+                .Where(e => !e.isCore && e.Status == ExpansionStatus.Active)
+                .Select(e => e.defName)
+                .ToList();
+            report.ModCount = LoadedModManager.RunningModsListForReading.Count;
+            report.IsHost = Multiplayer.LocalServer != null;
+            report.ArbiterPlaying = Multiplayer.session.ArbiterPlaying;
+            report.AsyncTime = Multiplayer.GameComp.asyncTime;
+            report.Multifaction = Multiplayer.GameComp.multifaction;
+            report.PlayerCount = Multiplayer.session.players.Count;
+            report.MapCount = Find.Maps?.Count ?? 0;
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"Partial desync summary: {e}");
+        }
+
+        try
+        {
+            // diffAt is -1 when every trace matched; point at the last shared trace instead
+            var traceIndex = diffAt >= 0 ? diffAt : local.desyncStackTraces.Count - 1;
+            var trace = local.desyncStackTraces.ElementAtOrDefault(traceIndex);
+            if (trace != null)
+            {
+                report.FirstDivergingTraceInfo = $"#{traceIndex} Tick:{trace.tick} Hash:{trace.hash} '{trace.AdditionalInfo}'";
+                report.FirstDivergingStack = trace.StackTraceString
+                    .Split('\n')
+                    .Select(l => l.TrimEnd('\r'))
+                    .Where(l => l.Length > 0)
+                    .ToList();
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"Couldn't read the diverging trace for the desync summary: {e}");
+        }
+
+        return report;
     }
 
     private string GetLocalTraces()

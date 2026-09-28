@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using Multiplayer.Client.Desyncs;
 using Multiplayer.Client.Util;
 using Multiplayer.Common;
+using Multiplayer.Common.Desyncs;
+using RimWorld;
 using UnityEngine;
 using Verse;
 using Random = System.Random;
@@ -104,6 +108,12 @@ public static class MpSettingsUI
                 Log.Error($"Failed to generate debug info {e}");
             }
         }
+
+        if (listing.ButtonText("Bundle desync reports"))
+            Find.WindowStack.Add(new FloatMenu([
+                new FloatMenuOption("Without replays (small)", () => BundleDesyncReports(false)),
+                new FloatMenuOption("With replays (large, lets the desync be replayed)", () => BundleDesyncReports(true)),
+            ]));
 
         if (VersionChecker.IsContinuousRelease || VersionChecker.IsLocalBuild)
             listing.CheckboxLabeled("MpIncludeReplayInDesync".Translate(), ref settings.includeReplayInDesync);
@@ -262,6 +272,24 @@ public static class MpSettingsUI
             Find.ColonistBar.CheckRecacheEntries();
         }
 
+    }
+
+    private static void BundleDesyncReports(bool includeReplays)
+    {
+        try
+        {
+            var name = $"DesyncBundle-{DateTime.Now:yyyyMMdd-HHmmss}{(includeReplays ? "-replays" : "")}.zip";
+            var result = DesyncArchive.CreateBundle(SaveableDesyncInfo.DesyncArchiveDir,
+                Path.Combine(Multiplayer.DesyncsDir, name), includeReplays, DateTime.UtcNow);
+
+            Messages.Message($"Bundled {result.ReportCount} desync report(s) ({result.GroupCount} distinct) into {name}",
+                MessageTypeDefOf.NeutralEvent, false);
+            ShellOpenDirectory.Execute(Multiplayer.DesyncsDir);
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Failed to bundle desync reports: {e}");
+        }
     }
 
     private enum SettingsPage
